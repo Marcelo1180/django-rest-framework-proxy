@@ -8,9 +8,15 @@ USER_SETTINGS = getattr(settings, 'REST_PROXY', None)
 DEFAULTS = {
     'HOST': None,
     'AUTH': {
+        'type': 'Basic',
         'user': None,
         'password': None,
         'token': None,
+        # Parametros para tipo JWT
+        'num_attemps': 1,
+        'auth_url': None,
+        'auth_credentials': None,
+        'jwt_auth_header_prefix': 'Bearer'
     },
     'TIMEOUT': None,
     'DEFAULT_HTTP_ACCEPT': 'application/json',

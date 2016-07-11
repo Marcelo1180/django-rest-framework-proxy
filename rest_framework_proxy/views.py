@@ -82,19 +82,46 @@ class ProxyView(BaseProxyView):
         # Translate Accept HTTP field
         accept_maps = self.proxy_settings.ACCEPT_MAPS
         for old, new in accept_maps.items():
-            headers['Accept'] = headers['Accept'].replace(old, new)
+           headers['Accept'] = headers['Accept'].replace(old, new)
 
-        username = self.proxy_settings.AUTH.get('user')
-        password = self.proxy_settings.AUTH.get('password')
-        if username and password:
-            auth_token = '%s:%s' % (username, password)
-            auth_token = base64.b64encode(auth_token.encode('utf-8')).decode()
-            headers['Authorization'] = 'Basic %s' % auth_token
-        else:
-            auth_token = self.proxy_settings.AUTH.get('token')
-            if auth_token:
-                headers['Authorization'] = auth_token
+        xtype = self.proxy_settings.AUTH['type']
+        if xtype == "Basic":
+            username = self.proxy_settings.AUTH['user']
+            password = self.proxy_settings.AUTH['password']
+
+            if username and password:
+                base64string = base64.encodestring('%s:%s' % (username, password)).replace('\n', '')
+                headers['Authorization'] = 'Basic %s' % base64string
+            else:
+                auth_token = self.proxy_settings.AUTH.get('token')
+                if auth_token:
+                    headers['Authorization'] = auth_token
+
+        if xtype == "JWT":
+            headers = self.get_headers_jwt(request, headers)
+
         return headers
+
+    def get_headers_jwt(self, request, headers, status=200):
+        """
+        :param request: Maneja el evento de pedido url actual
+        :param status: Estado de respuesta si es estado 401 vuelve a renovar el token
+        :return: Cabecera (header)
+        """
+        if not ("drf_jwt_token" in request.session) or status == 401:
+            xhost = self.proxy_settings.HOST
+            xurl_token = self.proxy_settings.AUTH['auth_url']
+            post_data = self.proxy_settings.AUTH['auth_credentials']
+            post_request = requests.post("%s/%s" % (xhost, xurl_token), data=post_data)
+            if "token" in post_request.json():
+                request.session['drf_jwt_token'] = post_request.json()["token"]
+            else:
+                print "No se hallo la variable 'token' -> %s" % post_request.text
+
+        xprefix = self.proxy_settings.AUTH['jwt_auth_header_prefix']
+        headers['Authorization'] = "%s %s" % (xprefix, request.session['drf_jwt_token'])
+        return headers
+
 
     def get_verify_ssl(self, request):
         return self.verify_ssl or self.proxy_settings.VERIFY_SSL
@@ -153,45 +180,58 @@ class ProxyView(BaseProxyView):
         params = self.get_request_params(request)
         data = self.get_request_data(request)
         files = self.get_request_files(request)
+
         headers = self.get_headers(request)
+
         verify_ssl = self.get_verify_ssl(request)
         cookies = self.get_cookies(request)
 
+        sw_count = self.proxy_settings.AUTH['num_attemps']
         try:
-            if files:
-                """
-                By default requests library uses chunked upload for files
-                but it is much more easier for servers to handle streamed
-                uploads.
+            while sw_count >= 1:
+                if files:
+                    """
+                    By default requests library uses chunked upload for files
+                    but it is much more easier for servers to handle streamed
+                    uploads.
 
-                This new implementation is also lightweight as files are not
-                read entirely into memory.
-                """
-                boundary = generate_boundary()
-                headers['Content-Type'] = 'multipart/form-data; boundary=%s' % boundary
+                    This new implementation is also lightweight as files are not
+                    read entirely into memory.
+                    """
+                    boundary = generate_boundary()
+                    headers['Content-Type'] = 'multipart/form-data; boundary=%s' % boundary
 
-                body = StreamingMultipart(data, files, boundary)
+                    body = StreamingMultipart(data, files, boundary)
 
-                session = sessions.Session()
-                session.mount('http://', StreamingHTTPAdapter())
-                session.mount('https://', StreamingHTTPAdapter())
+                    session = sessions.Session()
+                    session.mount('http://', StreamingHTTPAdapter())
+                    session.mount('https://', StreamingHTTPAdapter())
 
-                response = session.request(request.method, url,
-                        params=params,
-                        data=body,
-                        headers=headers,
-                        timeout=self.proxy_settings.TIMEOUT,
-                        verify=verify_ssl,
-                        cookies=cookies)
-            else:
-                response = requests.request(request.method, url,
-                        params=params,
-                        data=data,
-                        files=files,
-                        headers=headers,
-                        timeout=self.proxy_settings.TIMEOUT,
-                        verify=verify_ssl,
-                        cookies=cookies)
+                    response = session.request(request.method, url,
+                            params=params,
+                            data=body,
+                            headers=headers,
+                            timeout=self.proxy_settings.TIMEOUT,
+                            verify=verify_ssl,
+                            cookies=cookies)
+                else:
+                    response = requests.request(request.method, url,
+                            params=params,
+                            data=data,
+                            files=files,
+                            headers=headers,
+                            timeout=self.proxy_settings.TIMEOUT,
+                            verify=verify_ssl,
+                            cookies=cookies)
+
+                if response.status_code == 401:
+                    headers = self.get_headers_jwt(request, headers, response.status_code)
+
+                if response.status_code == 200:
+                    sw_count = 0
+
+                sw_count -= 1
+
         except (ConnectionError, SSLError):
             status = requests.status_codes.codes.bad_gateway
             return self.create_error_response({
@@ -204,6 +244,12 @@ class ProxyView(BaseProxyView):
                 'code': status,
                 'error': 'Gateway timed out',
             }, status)
+        # except (Timeout):
+        #     status = requests.status_codes.codes.gateway_timeout
+        #     return self.create_error_response({
+        #         'code': status,
+        #         'error': 'Gateway timed out',
+        #     }, status)
 
         return self.create_response(response)
 
